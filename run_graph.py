@@ -61,6 +61,7 @@ from sklearn.metrics import f1_score, classification_report
 from transformers.adapters import MAMConfig, LoRAConfig, UniPELTConfig
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+import numpy as np
 
 import copy
 # os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
@@ -77,7 +78,7 @@ MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
 
 def conflict_detect(predictions, args):
-    import numpy as np
+    # import numpy as np
     num_sentences = int(len(predictions)**0.5)
     # if args.dataset_domain == 'cdcp':
     #     logits_mtx = np.array(logits).reshape(num_sentences, num_sentences, 2)
@@ -113,6 +114,7 @@ def max_vote(logits1, logits2, pred1, pred2):
     pred1 = post_process_diag(pred1)
     pred2 = post_process_diag(pred2)
     pred_res = []
+    confidence_res = []
     for i in range(len(logits1)):
 
         soft_logits1 = torch.nn.functional.softmax(logits1[i]) # [[j] for j in range(logits1.shape[1])]
@@ -130,12 +132,39 @@ def max_vote(logits1, logits2, pred1, pred2):
         #     pred_res.append(int(pred2[i].detach().cpu().numpy()))
         if (values_1[0] - values_1[1]) >= (values_2[0] - values_2[1]):
             pred_res.append(int(pred1[i].detach().cpu().numpy()))
+            confidence_res.append(float((values_1[0] - values_1[1]).detach().cpu().numpy()))
         else:
             pred_res.append(int(pred2[i].detach().cpu().numpy()))
+            confidence_res.append(float((values_2[0] - values_2[1]).detach().cpu().numpy()))
 
+    return pred_res, confidence_res
 
+# def max_vote(logits1, logits2, pred1, pred2):
 
-    return pred_res
+#     pred1 = post_process_diag(pred1)
+#     pred2 = post_process_diag(pred2)
+#     pred_res = []
+#     for i in range(len(logits1)):
+
+#         soft_logits1 = torch.nn.functional.softmax(logits1[i]) # [[j] for j in range(logits1.shape[1])]
+#         soft_logits2 = torch.nn.functional.softmax(logits2[i])
+
+#         # two class
+#         # torch.topk(soft_logits1, n=2)
+#         values_1, _ = soft_logits1.topk(k=2)
+#         values_2, _ = soft_logits2.topk(k=2)
+#         # import ipdb
+#         # ipdb.set_trace()
+#         # if (values_1[0] - values_2[0]) > (values_1[1] - values_2[1]):
+#         #     pred_res.append(int(pred1[i].detach().cpu().numpy()))
+#         # else:
+#         #     pred_res.append(int(pred2[i].detach().cpu().numpy()))
+#         if (values_1[0] - values_1[1]) >= (values_2[0] - values_2[1]):
+#             pred_res.append(int(pred1[i].detach().cpu().numpy()))
+#         else:
+#             pred_res.append(int(pred2[i].detach().cpu().numpy()))
+
+#     return pred_res
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Finetune a transformers model on a multiple choice task")
@@ -288,7 +317,7 @@ def parse_args():
         choices=["head", "tail", "dual"],
     )
     parser.add_argument("--model_mode", type=str, default="bert_mtl_1d", choices=['bert_mtl_1d', 'bert_2d', 'bert_1d', 'bert', 'bert_self'])
-    parser.add_argument("--dataset_domain", type=str, default="cdcp", choices=['cdcp', 'absRCT'])
+    parser.add_argument("--dataset_domain", type=str, default="cdcp", choices=['cdcp', 'absRCT', 'ukp'])
     parser.add_argument("--win_size", type=int, default=12, help="symmetry cropping")
     parser.add_argument(
         "--full_map",
@@ -380,7 +409,7 @@ class DataCollatorForMultipleChoice:
 
 def main():
     args = parse_args()
-    args.cache_dir = "/cw/liir_code/NoCsBack/sun/cache/transformers/"
+    args.cache_dir = ""
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     send_example_telemetry("run_swag_no_trainer", args)
@@ -451,6 +480,8 @@ def main():
             data_files["train"] = args.train_file
         if args.validation_file is not None:
             if args.dataset_domain == 'cdcp':
+                data_files["validation"] = args.validation_file
+            elif args.dataset_domain == 'ukp':
                 data_files["validation"] = args.validation_file
             else:
                 data_files["validation_neo"] = args.validation_file
@@ -595,6 +626,8 @@ def main():
     train_dataset = processed_datasets["train"]
     if args.dataset_domain == 'cdcp':
         eval_dataset = processed_datasets["validation"]
+    elif args.dataset_domain == 'ukp':
+        eval_dataset = processed_datasets["validation"]
     else:
         eval_dataset_neo = processed_datasets["validation_neo"]
         eval_dataset_mix = processed_datasets["validation_mix"]
@@ -621,6 +654,8 @@ def main():
         train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
     if args.dataset_domain == 'cdcp':
+        eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
+    elif args.dataset_domain == 'ukp':
         eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
     else:
         eval_dataloader_neo = DataLoader(eval_dataset_neo, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
@@ -666,6 +701,10 @@ def main():
 
     # Prepare everything with our `accelerator`.
     if args.dataset_domain == 'cdcp':
+        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
+        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
+    )
+    elif args.dataset_domain == 'ukp':
         model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
     )
@@ -738,13 +777,15 @@ def main():
 
     if args.dataset_domain == 'cdcp':
         fscore = 0
+    elif args.dataset_domain == 'ukp':
+        fscore = 0
     else:
         fscore_neo = 0
         fscore_mix = 0
         fscore_gla = 0
     for epoch in range(starting_epoch, args.num_train_epochs):
         if epoch == 0:
-            model_dir = os.path.join('/cw/liir_code/NoCsBack/sun/argument_mining/log', '_'.join(['{}_{}'.format(args.model_mode, args.dataset_domain), time.strftime('%b_%d_%H_%M_%S', time.localtime())]))
+            model_dir = os.path.join('', '_'.join(['{}_{}'.format(args.model_mode, args.dataset_domain), time.strftime('%b_%d_%H_%M_%S', time.localtime())]))
             os.makedirs(model_dir)
         with open(model_dir + '/desc.txt', 'w', encoding='utf-8') as f:
             f.write('\n'.join([str(args.model_name_or_path), str(args.description), str(args.dataset_domain), str(args.model_mode)]))
@@ -811,7 +852,22 @@ def main():
                 if args.model_mode == 'bert_mtl_1d':
                     # predictions = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
                     if args.voter_branch == "dual":
-                        predictions = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
+                        predictions, scores = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
+                        mtx_len = int(len(predictions)**0.5)
+                        # import ipdb
+                        # ipdb.set_trace()
+                        pred_mtx = np.array(predictions).reshape(mtx_len, mtx_len)
+                        score_mtx = np.array(scores).reshape(mtx_len, mtx_len)
+                        for i in range(mtx_len):
+                            for j in range(mtx_len):
+                                # if pred_mtx[i,j] == 1 and pred_mtx[j,i] == 2:
+                                #     pass
+                                # elif pred_mtx[i,j] == 1 and pred_mtx[j,i] == 1:
+                                if pred_mtx[i, j] == 2:
+                                    pred_mtx[j, i] = 1
+
+                        # import ipdb
+                        # ipdb.set_trace()
                     elif args.voter_branch == "head":
                         predictions = list(outputs.logits[0].argmax(dim=-1).detach().cpu().numpy())
                     else:
@@ -830,21 +886,106 @@ def main():
             eval_end_time = time.time()
             print('eval finish in {}'.format(eval_end_time - eval_start_time))
 
-            print(classification_report(r_list, p_list, digits=4))
-            print('#'*10)
+            # print(classification_report(r_list, p_list, digits=4))
+            # print('#'*10)
             print('Detect {} conflicts'.format(str(conflicts_num)))
 
 
-            with open(model_dir + '/conflits.txt', 'w+', encoding='utf-8') as f:
-                out_str = ''.join([str(conflicts_num)])
-                out_str += '\n'
-                f.write(out_str)
-                f.close()
+            # with open(model_dir + '/conflits.txt', 'w+', encoding='utf-8') as f:
+            #     out_str = ''.join([str(conflicts_num)])
+            #     out_str += '\n'
+            #     f.write(out_str)
+            #     f.close()
 
+            # sep_str = ''.join(classification_report(r_list, p_list, digits=4))
+            r_list = [1 if ele != 0 else 0 for ele in r_list]
+            p_list = [1 if ele != 0 else 0 for ele in p_list]
+            print(classification_report(r_list, p_list, digits=4))
+            print('#'*10)
             if f1_score(r_list, p_list, average='macro') > fscore:
                 fscore = f1_score(r_list, p_list, average='macro')
                 torch.save(model.state_dict(), model_dir + '/best.pth')
                 with open(model_dir + '/results.txt', 'w', encoding='utf-8') as f:
+                    # out_str = sep_str + '\n' + ''.join(classification_report(r_list, p_list, digits=4))
+                    out_str = ''.join(classification_report(r_list, p_list, digits=4))
+                    out_str += '\n'
+                    # out_str += '{}'.format(str(conflicts_num))
+                    f.write(out_str)
+                    f.close()
+        elif args.dataset_domain == 'ukp':
+            p_list = []
+            r_list = []
+            conflicts_num = 0
+            eval_start_time = time.time()
+            for step, batch in enumerate(eval_dataloader):
+                with torch.no_grad():
+                    batch['mode'] = False
+                    outputs = model(**batch)
+            #     predictions = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
+            #     p_list += predictions
+            #     r_list += list(batch["labels"].squeeze(0).detach().cpu().numpy())
+            
+            # print('#'*10)
+            # print(classification_report(r_list, p_list, digits=4))
+            # print('#'*10)
+                if args.model_mode == 'bert_mtl_1d':
+                    # predictions = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
+                    if args.voter_branch == "dual":
+                        predictions, scores = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
+                        # mtx_len = int(len(predictions)**0.5)
+                        # # import ipdb
+                        # # ipdb.set_trace()
+                        # pred_mtx = np.array(predictions).reshape(mtx_len, mtx_len)
+                        # score_mtx = np.array(scores).reshape(mtx_len, mtx_len)
+                        # for i in range(mtx_len):
+                        #     for j in range(mtx_len):
+                        #         # if pred_mtx[i,j] == 1 and pred_mtx[j,i] == 2:
+                        #         #     pass
+                        #         # elif pred_mtx[i,j] == 1 and pred_mtx[j,i] == 1:
+                        #         if pred_mtx[i, j] == 2:
+                        #             pred_mtx[j, i] = 1
+
+                        # import ipdb
+                        # ipdb.set_trace()
+                    elif args.voter_branch == "head":
+                        predictions = list(outputs.logits[0].argmax(dim=-1).detach().cpu().numpy())
+                    else:
+                        predictions = list(outputs.logits[1].argmax(dim=-1).detach().cpu().numpy())
+                    # import ipdb
+                    # ipdb.set_trace()
+                    p_list += predictions
+                else:
+                    predictions = outputs.logits.argmax(dim=-1)
+                    p_list += list(predictions.detach().cpu().numpy())
+                # import ipdb
+                # ipdb.set_trace()
+                r_list += list(batch["labels"].squeeze(0).detach().cpu().numpy())
+                # conflicts_num += conflict_detect(predictions, args)
+            
+            eval_end_time = time.time()
+            print('eval finish in {}'.format(eval_end_time - eval_start_time))
+
+            # print(classification_report(r_list, p_list, digits=4))
+            # print('#'*10)
+            print('Detect {} conflicts'.format(str(conflicts_num)))
+
+
+            # with open(model_dir + '/conflits.txt', 'w+', encoding='utf-8') as f:
+            #     out_str = ''.join([str(conflicts_num)])
+            #     out_str += '\n'
+            #     f.write(out_str)
+            #     f.close()
+
+            # sep_str = ''.join(classification_report(r_list, p_list, digits=4))
+            # r_list = [1 if ele != 0 else 0 for ele in r_list]
+            # p_list = [1 if ele != 0 else 0 for ele in p_list]
+            print(classification_report(r_list, p_list, digits=4))
+            print('#'*10)
+            if f1_score(r_list, p_list, average='macro') > fscore:
+                fscore = f1_score(r_list, p_list, average='macro')
+                torch.save(model.state_dict(), model_dir + '/best.pth')
+                with open(model_dir + '/results.txt', 'w', encoding='utf-8') as f:
+                    # out_str = sep_str + '\n' + ''.join(classification_report(r_list, p_list, digits=4))
                     out_str = ''.join(classification_report(r_list, p_list, digits=4))
                     out_str += '\n'
                     # out_str += '{}'.format(str(conflicts_num))
@@ -862,7 +1003,7 @@ def main():
                 if args.model_mode == 'bert_mtl_1d':
                     # predictions = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
                     if args.voter_branch == "dual":
-                        predictions = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
+                        predictions, confidence_res = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
                     elif args.voter_branch == "head":
                         predictions = list(outputs.logits[0].argmax(dim=-1).detach().cpu().numpy())
                     else:
@@ -880,7 +1021,8 @@ def main():
             
             eval_end_time = time.time()
             print('eval finish in {}'.format(eval_end_time - eval_start_time))
-
+            # import ipdb
+            # ipdb.set_trace()
             print(classification_report(r_list, p_list, digits=4))
             print('#'*10)
             print('Detect {} conflicts'.format(str(conflicts_num_neo)))
@@ -896,47 +1038,7 @@ def main():
             # print(classification_report(r_list, p_list, digits=4))
             # print('#'*10)
             fscore_neo_cur = f1_score(r_list, p_list, average='macro')
-            # --------------------------------------------------------
-            # --------------------------------------------------------
-            p_list = []
-            r_list = []
-            conflicts_num_mix = 0
-            for step, batch in enumerate(eval_dataloader_mix):
-                with torch.no_grad():
-                    batch['mode'] = False
-                    outputs = model(**batch)
-                if args.model_mode == 'bert_mtl_1d':
-                    # predictions = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
-                    if args.voter_branch == "dual":
-                        predictions = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
-                    elif args.voter_branch == "head":
-                        predictions = list(outputs.logits[0].argmax(dim=-1).detach().cpu().numpy())
-                    else:
-                        predictions = list(outputs.logits[1].argmax(dim=-1).detach().cpu().numpy())
-                    # import ipdb
-                    # ipdb.set_trace()
-                    p_list += predictions
-                else:
-                    predictions = outputs.logits.argmax(dim=-1)
-                    p_list += list(predictions.detach().cpu().numpy())
-                r_list += list(batch["labels"].squeeze(0).detach().cpu().numpy())
-                # conflicts_num_mix += conflict_detect(predictions, args)
             
-            print(classification_report(r_list, p_list, digits=4))
-            print('#'*10)
-            print('Detect {} conflicts'.format(str(conflicts_num_mix)))
-            #     if args.model_mode == 'bert_mtl_1d':
-            #         predictions = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
-            #         p_list += predictions
-            #     else:
-            #         predictions = outputs.logits.argmax(dim=-1)
-            #         p_list += list(predictions.detach().cpu().numpy())
-            #     r_list += list(batch["labels"].squeeze(0).detach().cpu().numpy())
-            
-            # print('#'*10)
-            # print(classification_report(r_list, p_list, digits=4))
-            # print('#'*10)
-            fscore_mix_cur = f1_score(r_list, p_list, average='macro')
             # --------------------------------------------------------
             # --------------------------------------------------------
             p_list = []
@@ -949,7 +1051,7 @@ def main():
                 if args.model_mode == 'bert_mtl_1d':
                     # predictions = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
                     if args.voter_branch == "dual":
-                        predictions = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
+                        predictions, confidence_res = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
                     elif args.voter_branch == "head":
                         predictions = list(outputs.logits[0].argmax(dim=-1).detach().cpu().numpy())
                     else:
@@ -980,6 +1082,50 @@ def main():
 
             fscore_gla_cur = f1_score(r_list, p_list, average='macro')
 
+            # --------------------------------------------------------
+            # --------------------------------------------------------
+            p_list = []
+            r_list = []
+            conflicts_num_mix = 0
+            for step, batch in enumerate(eval_dataloader_mix):
+                with torch.no_grad():
+                    batch['mode'] = False
+                    outputs = model(**batch)
+                if args.model_mode == 'bert_mtl_1d':
+                    # predictions = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
+                    if args.voter_branch == "dual":
+                        predictions, confidence_res = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
+                    elif args.voter_branch == "head":
+                        predictions = list(outputs.logits[0].argmax(dim=-1).detach().cpu().numpy())
+                    else:
+                        predictions = list(outputs.logits[1].argmax(dim=-1).detach().cpu().numpy())
+                    # import ipdb
+                    # ipdb.set_trace()
+                    p_list += predictions
+                else:
+                    predictions = outputs.logits.argmax(dim=-1)
+                    p_list += list(predictions.detach().cpu().numpy())
+                r_list += list(batch["labels"].squeeze(0).detach().cpu().numpy())
+                # conflicts_num_mix += conflict_detect(predictions, args)
+            
+            print(classification_report(r_list, p_list, digits=4))
+            print('#'*10)
+            print('Detect {} conflicts'.format(str(conflicts_num_mix)))
+            #     if args.model_mode == 'bert_mtl_1d':
+            #         predictions = max_vote(outputs.logits[0], outputs.logits[1], outputs.logits[0].argmax(dim=-1), outputs.logits[1].argmax(dim=-1))
+            #         p_list += predictions
+            #     else:
+            #         predictions = outputs.logits.argmax(dim=-1)
+            #         p_list += list(predictions.detach().cpu().numpy())
+            #     r_list += list(batch["labels"].squeeze(0).detach().cpu().numpy())
+            
+            # print('#'*10)
+            # print(classification_report(r_list, p_list, digits=4))
+            # print('#'*10)
+            fscore_mix_cur = f1_score(r_list, p_list, average='macro')
+            # --------------------------------------------------------
+            # --------------------------------------------------------
+
             with open(model_dir + '/conflits.txt', 'w+', encoding='utf-8') as f:
                 out_str = ''.join([str(conflicts_num_neo), str(conflicts_num_mix), str(conflicts_num_gla)])
                 out_str += '\n'
@@ -992,7 +1138,7 @@ def main():
                 fscore_neo = fscore_neo_cur
                 torch.save(model.state_dict(), model_dir + '/best.pth')
                 with open(model_dir + '/results.txt', 'w', encoding='utf-8') as f:
-                    out_str = ''.join([str(fscore_neo_cur), str(fscore_mix_cur), str(fscore_gla_cur)])
+                    out_str = ''.join([str(fscore_neo_cur), str(fscore_gla_cur), str(fscore_mix_cur)])
                     out_str += '\n'
                     # out_str += ''.join([str(fscore_neo_cur), str(fscore_mix_cur), str(fscore_gla_cur)])
                     f.write(out_str)
