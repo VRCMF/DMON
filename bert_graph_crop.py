@@ -1720,12 +1720,12 @@ class MultiScaleResidualBlock_HV(nn.Module):
         super(MultiScaleResidualBlock_HV, self).__init__()
 
         # ---------------------------------------------ABS---------------------------------------------
-        self.conv7_1 = ConvLayer_1d(in_channels=in_channels, out_channels=out_channels, kernel_size=5)
-        self.conv5_1 = ConvLayer_1d(in_channels=in_channels, out_channels=out_channels, kernel_size=3)
+        # self.conv7_1 = ConvLayer_1d(in_channels=in_channels, out_channels=out_channels, kernel_size=5)
+        # self.conv5_1 = ConvLayer_1d(in_channels=in_channels, out_channels=out_channels, kernel_size=3)
         # ---------------------------------------------ABS---------------------------------------------
         # ---------------------------------------------CDCP---------------------------------------------
-        # self.conv5_1 = ConvLayer_1d(in_channels=in_channels, out_channels=out_channels, kernel_size=7)
-        # self.conv3_1 = ConvLayer_1d(in_channels=in_channels, out_channels=out_channels, kernel_size=5)
+        self.conv5_1 = ConvLayer_1d(in_channels=in_channels, out_channels=out_channels, kernel_size=7)
+        self.conv3_1 = ConvLayer_1d(in_channels=in_channels, out_channels=out_channels, kernel_size=5)
         # ---------------------------------------------CDCP---------------------------------------------
         # self.conv3_1 = ConvLayer_1d(in_channels=in_channels, out_channels=out_channels, kernel_size=3)
 
@@ -1737,12 +1737,12 @@ class MultiScaleResidualBlock_HV(nn.Module):
     def forward(self, x):
 
         # ---------------------------------------------ABS---------------------------------------------
-        O1 = self.conv7_1(x)
-        P1 = self.conv5_1(x)
+        # O1 = self.conv7_1(x)
+        # P1 = self.conv5_1(x)
         # ---------------------------------------------ABS---------------------------------------------
         # ---------------------------------------------CDCP---------------------------------------------
-        # O1 = self.conv5_1(x)
-        # P1 = self.conv3_1(x)
+        O1 = self.conv5_1(x)
+        P1 = self.conv3_1(x)
         # ---------------------------------------------CDCP---------------------------------------------
         # S1 = self.conv3_1(x)
 
@@ -1858,6 +1858,8 @@ class BertForMultipleChoice(BertPreTrainedModel):
         self.destroy = config.destroy
         if config.dataset_domain == 'cdcp':
             self.label_dim = 2
+        elif config.dataset_domain == 'ukp':
+            self.label_dim = 2 # 2
         else:
             self.label_dim = 3
         if config.model_mode == 'bert_mtl_1d':
@@ -2119,7 +2121,7 @@ class BertForMultipleChoice(BertPreTrainedModel):
             # loss_fct = FocalLoss(gamma=5)
             # loss = loss_fct(reshaped_logits, labels.view(-1))/(final_element**2)
             if self.model_mode == 'bert_mtl_1d':
-                loss = 0.5*loss_fct(logits_h, labels.view(-1)) + 0.5*loss_fct(logits_v, labels.view(-1))
+                loss = 0.6*loss_fct(logits_h, labels.view(-1)) + 0.4*loss_fct(logits_v, labels.view(-1))
             else:
                 loss = loss_fct(logits, labels.view(-1))
             # loss = Variable(loss, requires_grad = True)
